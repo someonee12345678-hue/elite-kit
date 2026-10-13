@@ -25,6 +25,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
@@ -34,10 +36,11 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Generate minimal fictional-data test app
+      - name: Generate fictional test app
         shell: bash
         run: |
           mkdir -p app/src/main/java/com/elitekit/smoketest
+
           cat > settings.gradle.kts <<'GRADLE_SETTINGS'
           pluginManagement {
               repositories {
@@ -67,9 +70,11 @@ jobs:
           plugins {
               id("com.android.application")
           }
+
           android {
               namespace = "com.elitekit.smoketest"
               compileSdk = 35
+
               defaultConfig {
                   applicationId = "com.elitekit.smoketest"
                   minSdk = 23
