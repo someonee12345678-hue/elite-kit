@@ -1,0 +1,24 @@
+name: Elite Kit Phone-Only Build Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  environment-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Confirm runner works
+        run: |
+          echo "Elite Kit diagnostic started."
+          echo "This is a fictional-data build check."
+          echo "No legal records or secrets are used."
+          echo "No APK is built or released in this test."
