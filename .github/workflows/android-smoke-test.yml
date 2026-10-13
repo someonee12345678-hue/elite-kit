@@ -1,5 +1,5 @@
 
-name: Elite Kit Android APK Smoke Test
+name: Elite Kit Android Build
 
 on:
   workflow_dispatch:
@@ -11,10 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  build-test-apk:
+  build-elite-kit:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
+      - name: Check out Elite Kit repository
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -31,108 +32,18 @@ jobs:
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Generate fictional test app
-        shell: bash
-        run: |
-          mkdir -p app/src/main/java/com/elitekit/smoketest
-
-          cat > settings.gradle.kts <<'GRADLE_SETTINGS'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "EliteKitBuildSmokeTest"
-          include(":app")
-          GRADLE_SETTINGS
-
-          cat > build.gradle.kts <<'ROOT_GRADLE'
-          plugins {
-              id("com.android.application") version "8.7.3" apply false
-          }
-          ROOT_GRADLE
-
-          cat > app/build.gradle.kts <<'APP_GRADLE'
-          plugins {
-              id("com.android.application")
-          }
-
-          android {
-              namespace = "com.elitekit.smoketest"
-              compileSdk = 35
-
-              defaultConfig {
-                  applicationId = "com.elitekit.smoketest"
-                  minSdk = 23
-                  targetSdk = 35
-                  versionCode = 1
-                  versionName = "0.0.1-smoke-test"
-              }
-          }
-          APP_GRADLE
-
-          cat > app/src/main/AndroidManifest.xml <<'MANIFEST'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application
-                  android:allowBackup="false"
-                  android:label="Elite Kit Build Check"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          MANIFEST
-
-          cat > app/src/main/java/com/elitekit/smoketest/MainActivity.java <<'JAVA'
-          package com.elitekit.smoketest;
-
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.view.Gravity;
-          import android.widget.TextView;
-
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  TextView message = new TextView(this);
-                  message.setText("ELITE KIT\n\nAndroid APK build passed.\n\nSmoke test only.\nFictional data only.\nNo legal records stored.");
-                  message.setTextSize(22);
-                  message.setGravity(Gravity.CENTER);
-                  message.setPadding(32, 32, 32, 32);
-                  setContentView(message);
-              }
-          }
-          JAVA
-
-      - name: Build debug APK
+      - name: Build the actual Elite Kit app
         run: gradle --no-daemon assembleDebug
 
-      - name: Upload test APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: elite-kit-android-smoke-test-apk
+          name: elite-kit-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
