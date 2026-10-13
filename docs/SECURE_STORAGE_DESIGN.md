@@ -1,7 +1,7 @@
 # ELITE KIT — SECURE STORAGE & RECOVERY DESIGN SPECIFICATION
 
 Document Path: docs/SECURE_STORAGE_DESIGN.md
-Version: 1.0-proposed
+Version: 1.1-proposed
 Authoritative Baseline: dbd4153ca39ede69890ebaf47feaab7f393c3c5a
 Governing Authority: MASTER_CONTROL.md
 
@@ -9,155 +9,144 @@ Governing Authority: MASTER_CONTROL.md
 
 ## 1. Status and Scope
 
-- **Implementation Status**: [PROPOSED] Architecture Specification. All cryptographic storage capabilities, key wrapping mechanisms, backup/restore engines, and recovery seed workflows described herein are NOT IMPLEMENTED in application source code.
+- **Implementation Status**: [PROPOSED — NOT IMPLEMENTED] Architecture Specification. All cryptographic storage capabilities, key wrapping mechanisms, backup/restore engines, and recovery seed workflows described herein are NOT IMPLEMENTED in application source code.
 - **Scope**: Local-first Android native application (`com.elitekit.app`), targeting Java 17, Android API 26+ (minSdk 26, targetSdk 35, compileSdk 35), $0 tooling cost, preserving the `main` branch and existing GitHub Actions workflows (`.github/workflows/main.yml` and `.github/workflows/android-smoke-test.yml`).
 - **Data Policy**: 100% synthetic fictional test data during all development phases. Real confidential legal records remain **STRICTLY PROHIBITED** until every security capability, key derivation layer, encrypted backup mechanism, safe restore pipeline, replacement-phone recovery workflow, and required automated test suite has been implemented and verified passing in CI.
 - **Repository Baseline Reality**: The current codebase contains a minimal native Java app shell (`MainActivity.java`). Encrypted database tables, key wrapping mechanisms, backup generators, restore engines, and recovery seed modules are **NOT IMPLEMENTED**.
 
 ---
 
-## 2. Threat Model and Security Boundaries
+## 2. Threat Model
 
-### 2.1 Asset Inventory & Protection Targets
-- **Structured Workspace Data**: Client records, legal case notes, matter metadata, chronological events stored in SQLite.
-- **Evidence Media & Files**: Imported documents (PDF, DOCX), images (PNG, JPEG), and audio recordings.
-- **Master Encryption Keys**: Symmetric data encryption keys (`DEK`) and key encryption keys (`KEK`).
-
-### 2.2 Threat Vectors & Boundary Definitions
-1. **Physical Device Theft / Unlocks**: Attacker gains physical possession of unlocked phone.
-   - *Boundary*: Android Keystore hardware protection + Master Passphrase requirement for key unwrapping.
-2. **Untrusted Shared Storage / ADB Extractions**: Malware or ADB backup attempts to read raw app database or media files from device storage.
-   - *Boundary*: AES-256-GCM application-level payload encryption ensures raw database files and media streams contain zero readable plaintext.
-3. **Transit & Cloud Storage Interception**: Interception or unauthorized extraction of backup archives stored on local SD cards or external cloud storage.
-   - *Boundary*: Versioned AEAD encrypted backup envelopes authenticated via `K_backup` derived from user credentials.
-4. **Malicious Backup Modification / Injection**: Attacker alters header fields or injects malicious entries into backup archives.
-   - *Boundary*: Additional Authenticated Data (AAD) binding and AEAD authentication tag verification before unpacking.
-5. **Rollback / Replay Attacks**: Attacker replaces current active database with a valid older database file to restore previously deleted records.
-   - *Boundary*: Monotonically increasing sequence counters / user-confirmed startup timestamps.
+1. **Lost or Stolen Phone**: Attacker acquires physical device in locked or unlocked state.
+   - *Boundary*: Android Keystore hardware boundary + user Master Passphrase required to unwrap `DEK`.
+2. **Unauthorized App Access / Shared Device**: Unprivileged app or user on local device attempts to inspect app storage.
+   - *Boundary*: Biometric / PIN unlock gate protecting local Keystore wrapping key (`KEK_keystore`).
+3. **Backup Theft or Disclosure**: Interception or extraction of backup files exported to local SD card or cloud storage.
+   - *Boundary*: AEAD authenticated encryption (`K_backup`) derived from user credentials; no plaintext payload exported.
+4. **Lost Device Keys or Recovery Material**: Device destroyed or recovery seed forgotten.
+   - *Boundary*: Independent wrapping paths via `KEK_passphrase` and `KEK_recovery` (BIP39 seed). If user loses both passphrase and seed, data is unrecoverable (zero backdoor).
+5. **Corrupted, Incomplete, or Malicious Backup**: Tampered headers, bit rot, or injected entries in backup archive.
+   - *Boundary*: Additional Authenticated Data (AAD) header binding and 128-bit AEAD tag verification before disk extraction or parsing.
+6. **Replacement-Phone Recovery**: Transferring encrypted workspace to a clean replacement device.
+   - *Boundary*: Pure credential-derived unwrapping (`KEK_recovery` or `KEK_passphrase`) with zero reliance on the old device's Keystore key.
+7. **Rollback, Truncation, and Deletion Risks**: Replaying an older valid database file to restore deleted entries or truncating database state.
+   - *Boundary*: Monotonically increasing sequence counters / user-confirmed state timestamps on launch.
 
 ---
 
-## 3. Storage Options & Encryption Architecture
+## 3. Data Architecture
 
-### 3.1 Maintained Component Evaluation
-- **Option A: Full-Database Page Encryption (SQLCipher for Android)** [PROPOSED ALTERNATIVE]:
-  - *Status*: Maintained open-source library (`net.zetetic:android-database-sqlcipher`).
-  - *Mechanism*: Encrypts every SQLite database page (headers, B-tree indexes, table schemas, row IDs, write-ahead logs) via AES-256.
-  - *Trade-offs*: Provides complete metadata obfuscation. However, it introduces C/C++ JNI native binaries (`.so` files), increasing APK size by ~12MB and adding native toolchain maintenance overhead.
-- **Option B: Standard SQLite + Application-Level AES-256-GCM Payload Encryption** [PROPOSED BASELINE]:
-  - *Status*: Built-in Android SDK SQLite (`android.database.sqlite`) + Java 17 standard cryptography (`javax.crypto`).
-  - *Mechanism*: Encrypts all record fields, notes, client metadata, and text payloads using AES-256-GCM (`AES/GCM/NoPadding`) prior to database insertion.
-  - *Trade-offs*: $0 added dependencies, zero native binary overhead, lightweight, hardware-accelerated.
-  - *Metadata Visibility Notice*: Field encryption **DOES NOT** hide SQLite database headers (`SQLite format 3`), table names, column definitions, index structures, total row counts, primary key sequences, or write-ahead log (WAL) page allocations.
-
-### 3.2 Evidence Media File Encryption
-- **Stream Encryption**: All imported evidence files are encrypted on write using AES-256-GCM streaming (`CipherOutputStream` / `CipherInputStream`).
-- **File Container Structure**: Encrypted evidence files store an unencrypted header containing magic bytes (`0x454C544B` = `ELTK`), spec version (`0x01`), 16-byte random salt, 12-byte random initialization vector (IV), followed by AES-256-GCM ciphertext and 128-bit AEAD authentication tag.
+1. **Separate Protection Requirements**:
+   - *Structured Database Data*: Client details, case notes, timeline events stored in SQLite. Protected via field-level or page-level AES-256 encryption.
+   - *Imported Evidence Files*: Documents (PDF), images (PNG/JPG), audio evidence streams stored in private file storage (`context.getFilesDir()`). Stream-encrypted on write via AES-256-GCM (`CipherOutputStream`).
+2. **Preserve Original Evidence**:
+   - Imported evidence files are written to immutable encrypted file containers. Modifications create versioned child records; original evidence files are never overwritten.
+3. **Transactional Storage Operations**:
+   - Database writes use explicit SQLite transactions (`beginTransaction()`, `setTransactionSuccessful()`, `endTransaction()`).
+   - File updates use temporary file write -> disk sync (`fsync`) -> file swap patterns.
+4. **Schema Versioning & Migrations**:
+   - Database maintains explicit `PRAGMA user_version`. Every schema migration is versioned, deterministic, and tested against clean rollback snapshots.
 
 ---
 
-## 4. Key Hierarchy and Android Keystore Role
+## 4. Key Hierarchy
 
-### 4.1 Non-Circular Key Hierarchy & Wrapping Architecture
-To prevent circular dependencies, key roles, derivation paths, and wrapping mechanisms are strictly ordered:
-
+### 4.1 Non-Circular Key Separation & Roles [PROPOSED]
 1. **Workspace Data Encryption Key (`DEK`)**:
-   - Cryptographically random 256-bit AES symmetric key (`SecureRandom`) generated once on workspace creation. Encrypts database record payloads and evidence files directly. `DEK` is never stored unencrypted. NOT IMPLEMENTED.
+   - Cryptographically random 256-bit AES symmetric key (`SecureRandom`) generated on workspace creation. Encrypts database record payloads and evidence files directly. Never written to disk in unencrypted plaintext. NOT IMPLEMENTED.
 2. **Passphrase Key Encryption Key (`KEK_passphrase`)**:
-   - Derived from normalized Master Passphrase + 16-byte random salt (`salt_passphrase.bin`) via `PBKDF2WithHmacSHA256` (200,000 provisional iterations). Wraps `DEK` as `wrapped_dek_passphrase.bin`. NOT IMPLEMENTED.
-3. **Recovery Key Encryption Key (`KEK_recovery`)**:
-   - Derived from NFKD-normalized 12/24-word BIP39 Recovery Seed + 16-byte random salt (`salt_recovery.bin`) via `PBKDF2WithHmacSHA256` (200,000 provisional iterations). Wraps `DEK` as `wrapped_dek_recovery.bin`. NOT IMPLEMENTED.
-4. **Local Keystore Key Encryption Key (`KEK_keystore`)**:
-   - Hardware-backed / TEE key generated inside `AndroidKeyStore` on the local phone. Wraps `DEK` as `wrapped_dek_keystore.bin` for biometric/PIN unlock. *Non-transferable hardware boundary; zero involvement in backup decryption or phone replacement.* NOT IMPLEMENTED.
+   - 256-bit symmetric key derived from Master Passphrase + `salt_passphrase.bin` via `PBKDF2WithHmacSHA256` (200,000 provisional iterations). Wraps `DEK` as `wrapped_dek_passphrase.bin`. NOT IMPLEMENTED.
+3. **Local Keystore Key Encryption Key (`KEK_keystore`)**:
+   - Hardware-backed / TEE key generated inside `AndroidKeyStore`. Wraps `DEK` as `wrapped_dek_keystore.bin` for biometric/PIN unlock on local device. *Device-bound hardware key; zero involvement in backup decryption or phone replacement.* NOT IMPLEMENTED.
+4. **Recovery Key Encryption Key (`KEK_recovery`)**:
+   - 256-bit key derived from NFKD-normalized 12/24-word BIP39 Recovery Seed + `salt_recovery.bin` via `PBKDF2WithHmacSHA256` (200,000 provisional iterations) or standard BIP39 derivation. Wraps `DEK` as `wrapped_dek_recovery.bin`. NOT IMPLEMENTED.
 5. **Backup Envelope Encryption Key (`K_backup`)**:
-   - Derived directly from `KEK_passphrase` OR `KEK_recovery` via HKDF-Expand with info string `"EliteKit-BackupPayloadKey-v1"`. Used to encrypt and authenticate the versioned backup archive envelope. NOT IMPLEMENTED.
+   - Derived directly from `KEK_passphrase` OR `KEK_recovery` via HKDF-Expand with info label `"EliteKit-BackupPayloadKey-v1"`. Used to encrypt and authenticate versioned backup envelopes. NOT IMPLEMENTED.
 
-### 4.2 Android Keystore Limitations & Non-Portability
-- `AndroidKeyStore` provides hardware-backed key protection (TEE/StrongBox) preventing key extraction even if the OS is rooted.
-- **Hardware Boundary Limitation**: Keys inside `AndroidKeyStore` are bound to the local physical hardware. They **CANNOT** be backed up, exported, or transferred to another phone.
-- **Design Rule**: `KEK_keystore` is used exclusively for local biometric quick-unlock (`wrapped_dek_keystore.bin`). **Decryption of backups and replacement-phone recovery MUST NOT rely on `AndroidKeyStore`.**
+### 4.2 Storage & Passphrase Rules
+- Plaintext keys or passphrases are **NEVER** stored in source code, logs, preferences, screenshots, or backups.
+- Passphrase character arrays (`char[]`) in memory are zeroed out (`Arrays.fill(pwd, '\0')`) immediately after derivation.
 
----
-
-## 5. Passphrase Handling and Replacement-Phone Recovery
-
-### 5.1 Credential Derivation & Unwrapping Flow
-
-| Task | Required Credential | Derivation & Unwrapping Flow | Keystore Dependency |
-| :--- | :--- | :--- | :--- |
-| **Decrypt Backup Envelope** | Master Passphrase OR BIP39 Recovery Seed | Derive `KEK` via PBKDF2 -> Expand `K_backup` via HKDF -> Decrypt AEAD Backup Envelope | **None** |
-| **Unwrap DEK (Replacement Phone)** | Master Passphrase OR BIP39 Recovery Seed | Derive `KEK_passphrase` or `KEK_recovery` -> Decrypt `wrapped_dek_passphrase.bin` or `wrapped_dek_recovery.bin` -> Recover `DEK` | **None** |
-| **Quick Daily Unlock (Local Device)** | Device PIN / Biometric | Read `wrapped_dek_keystore.bin` -> Unwrap via `KEK_keystore` in local `AndroidKeyStore` -> Recover `DEK` | Local Device Only |
-
-### 5.2 Replacement-Phone Recovery Procedure (Zero Keystore Reliance)
-1. On a clean replacement phone, the user inputs either their Master Passphrase or 12/24-word BIP39 Recovery Seed.
-2. The app reads `salt_recovery.bin` (or `salt_passphrase.bin`) from the unencrypted backup header.
-3. The app derives `KEK_recovery` (or `KEK_passphrase`), expands `K_backup`, and authenticates/decrypts the backup envelope.
-4. The app unwraps `wrapped_dek_recovery.bin` (or `wrapped_dek_passphrase.bin`), recovering the identical 256-bit `DEK`.
-5. The app generates a new local `KEK_keystore` inside the replacement phone's `AndroidKeyStore` and re-wraps `DEK` as `wrapped_dek_keystore.bin` to restore biometric quick-unlock on the new device. Zero reliance exists on the old phone's hardware key. NOT IMPLEMENTED.
+### 4.3 Key Loss & Passphrase Rotation Behavior
+- **Passphrase Change**: `DEK` remains constant. User inputs old passphrase, unwraps `DEK`, derives new `KEK_passphrase` from new passphrase, and re-wraps `DEK` as `wrapped_dek_passphrase.bin`. No database re-encryption required.
+- **Key Loss**: If user loses Master Passphrase AND BIP39 recovery seed, data is unrecoverable. No backdoor recovery exists.
+- **Recovery Disclaimer**: Recovery capabilities **CANNOT** be claimed operational until replacement-phone recovery tests pass in clean test environments.
 
 ---
 
-## 6. Encrypted Backup Envelope and Safe Restore Protocol
+## 5. Cryptographic Requirements
 
-### 6.1 Versioned Backup Envelope Format (Version `0x01`)
-- **Unencrypted Header** (Bytes 0–37):
-  - Magic Bytes: `ELITEKIT_BKP` (12 bytes)
-  - Spec Version: `0x01` (2 bytes)
-  - KDF Algorithm ID: `PBKDF2_SHA256` (2 bytes)
-  - KDF Salt: 16 bytes random salt
-  - KDF Iterations: 4 bytes (200,000)
-  - AEAD IV / Nonce: 12 bytes random IV
-- **Authenticated Additional Data (AAD)**: Unencrypted header fields passed to `Cipher.updateAAD()`. Modifying any header parameter invalidates AEAD tag.
-- **AEAD Encrypted Payload Body**: AES-256-GCM ciphertext encrypted using `K_backup`, containing `wrapped_dek_recovery.bin`, `database_snapshot.sqlite`, `evidence/` directory, and `manifest.json`.
-- **Manifest Protection**: `manifest.json` is encrypted inside the AEAD payload body. Decryption and AEAD tag verification occur **BEFORE** any entry in `manifest.json` is uncompressed, trusted, or unpacked to disk. NOT IMPLEMENTED.
-
-### 6.2 Safe Durable Restore Protocol & Idempotent Crash Recovery
-To prevent data loss during restore operations, the system enforces durable state markers written to `restore_state.json` (flushed to disk via `FileOutputStream.getFD().sync()`):
-
-1. **Durable Lifecycle States**:
-   - `STATE_0_IDLE`: Normal state.
-   - `STATE_1_STAGING`: Unpacking archive to isolated `cache/restore_staging/`.
-   - `STATE_2_AUTHENTICATED`: AEAD tag verified, `DEK` unwrapped, manifest digests & schema version validated.
-   - `STATE_3_SNAPSHOT_INIT`: Preparing `files/rollback_backup/`.
-   - `STATE_4_SNAPSHOT_COMPLETE`: Active workspace copied to `files/rollback_backup/`, verified against `rollback_manifest.json`, and synced (`fsync`).
-   - `STATE_5_SWAP_MARKER_WRITTEN`: `restore_state.json` written with durable swap marker and synced (`fsync`). Swap is imminent.
-   - `STATE_6_ACTIVATING_STAGED_DATA`: Staged files replacing active files in `files/data/`. (*File-system atomicity like `renameTo()` is NOT assumed*).
-   - `STATE_7_SWAP_COMPLETED`: Active workspace update verified. Synced (`fsync`).
-   - `STATE_8_CLEANUP`: Purging `files/rollback_backup/` and `cache/restore_staging/`.
-   - `STATE_0_IDLE`: Reset to idle.
-
-2. **Crash Recovery & Interruption Handling**:
-   - **Crash during States 1–3 (`STAGING`, `AUTHENTICATED`, `SNAPSHOT_INIT`)**: Startup recovery sees `STATE_3` or earlier without complete snapshot marker. Purges `cache/restore_staging/` and incomplete `files/rollback_backup/`. Active workspace was untouched.
-   - **Crash during State 5 or 6 (`SWAP_MARKER_WRITTEN` / `ACTIVATING_STAGED_DATA`)**: Startup recovery detects `STATE_5` or `STATE_6`. It reads complete `rollback_manifest.json` in `files/rollback_backup/`, copies original files back to `files/data/`, verifies checksums, flushes disk (`fsync`), purges staging, clears state markers, and resets to `STATE_0_IDLE`. **Existing workspace is 100% restored.**
-   - **Crashes during Rollback itself**: Idempotent rollback handler. Every file copy operation checks `rollback_manifest.json`. Retrying rollback after repeated crashes executes identical, stateless restore operations.
-   - **Crash during Cleanup (State 8)**: Swap was completed (`STATE_7_SWAP_COMPLETED`). Startup recovery finishes purging `rollback_backup/` and resets to `STATE_0_IDLE`. NOT IMPLEMENTED.
-
-3. **Handling Total Key Loss**:
-   - If user loses Master Passphrase AND BIP39 recovery seed, data is mathematically unrecoverable. Zero backdoor recovery paths exist.
+1. **Maintained Implementations First**:
+   - Standard Java 17 / Android JCE (`javax.crypto.Cipher`, `java.security.SecureRandom`, `javax.crypto.SecretKeyFactory`).
+   - SQLite: Evaluation comparing standard Android SDK `android.database.sqlite` vs open-source maintained `SQLCipher for Android` (`net.zetetic:android-database-sqlcipher`).
+2. **Authenticated Encryption (AEAD)**:
+   - All payload encryption uses AES-256-GCM (`AES/GCM/NoPadding`) with a 128-bit authentication tag.
+3. **Nonce / IV Uniqueness**:
+   - 12-byte (96-bit) cryptographically random IV generated fresh for every encryption operation via `SecureRandom`. Never reuse IV across encryptions under the same key.
+4. **Key Derivation (KDF)**:
+   - Password-based KDF (`PBKDF2WithHmacSHA256` or `Argon2id`). Low-entropy passwords MUST NOT use HKDF directly. HKDF is used strictly for key expansion from derived KEKs. KDF iteration counts are provisional pending hardware benchmarking.
+5. **Authentication Failure Handling**:
+   - Mismatched passphrases, altered ciphertext, or corrupted headers trigger immediate `AEADBadTagException` or `GeneralSecurityException`, halting extraction prior to database or file mutation.
+6. **Limits of Hashes**:
+   - SHA-256 digests are treated as integrity checksums (bit rot detection), **NOT** proof of authenticity or origin. AEAD authentication tags enforce authenticity. Rollback protection requires sequence/timestamp counters.
 
 ---
 
-## 7. Fictional-Data Test Requirements & Release Gates
+## 6. Backup and Restore
+
+1. **User-Controlled Encrypted Export**:
+   - Backups are created strictly upon explicit user request.
+   - No automatic background cloud upload. Exports produce versioned `.eltkbackup` archives.
+2. **Validation Before Restore**:
+   - The backup envelope header is authenticated via AAD, `K_backup` decrypts payload, and `manifest.json` SHA-256 digests & schema versions are validated **BEFORE** unpacking entries to disk.
+3. **Staged Restore & Data Preservation**:
+   - Unpacking occurs into isolated staging (`cache/restore_staging/`).
+   - Active workspace (`files/data/`) is snapshotted to `files/rollback_backup/` and tracked with `restore_state.json` synced via `fsync()`.
+   - If validation or restore fails or process crashes, startup recovery restores active files from `files/rollback_backup/`. Existing workspace is never destroyed on restore failure.
+4. **Replacement-Phone Recovery Procedure**:
+   - User inputs BIP39 seed or passphrase on clean device -> derives `KEK_recovery` or `KEK_passphrase` -> expands `K_backup` -> decrypts envelope -> unwraps `wrapped_dek_recovery.bin` -> recovers `DEK` -> generates local `KEK_keystore` -> re-wraps `DEK` locally as `wrapped_dek_keystore.bin`.
+
+---
+
+## 7. Approval Gates
+
+- Explicit modal user approval is **MANDATORY** for:
+  1. Destructive actions (deleting legal matters, purging evidence).
+  2. Backup restoration (replacing active workspace files).
+  3. Key rotation or recovery seed regeneration.
+  4. Schema migrations and release publishing.
+- The system will **NEVER** silently delete original evidence files, active databases, or backup archives.
+
+---
+
+## 8. Test Plan (Fictional Data Only)
 
 Real legal records remain **STRICTLY PROHIBITED** until 100% of the following automated unit, integration, and security tests pass in CI using synthetic test fixtures:
 
-1. **Replacement-Phone Recovery Test**: Export backup from Instance A; perform clean install on Instance B; recover using ONLY backup archive and BIP39 recovery seed; verify 100% byte-for-byte matching of database records and evidence files. [NOT IMPLEMENTED]
-2. **Wrong Credentials Test**: Attempt unwrapping `DEK` or decrypting backup with invalid passphrase or seed; verify `GeneralSecurityException` is thrown without corrupting active workspace. [NOT IMPLEMENTED]
-3. **Modified Header & AEAD Tampering Test**: Modify single bit in header AAD or ciphertext payload; verify immediate `AEADBadTagException` prior to parsing or unpacking entries. [NOT IMPLEMENTED]
-4. **Modified Ciphertext & Manifest Test**: Inject tampered file or alter `manifest.json` inside ciphertext; verify AEAD authentication failure blocks restore before disk unpack. [NOT IMPLEMENTED]
-5. **Unsupported Backup Version Test**: Attempt opening backup envelope with unsupported spec version flag (`0xFF`); verify clean compatibility error response. [NOT IMPLEMENTED]
-6. **Interrupted Snapshot Creation Test**: Force-kill process mid-way through `STATE_3_SNAPSHOT_INIT`; verify startup handler detects incomplete snapshot, purges snapshot, and preserves active workspace. [NOT IMPLEMENTED]
-7. **Interrupted Marker Write Test**: Force-kill process while writing state markers; verify atomic file write prevents corrupt marker files and defaults safely to previous state. [NOT IMPLEMENTED]
-8. **Crashes During Activation & Rollback Test**: Force-kill process during `STATE_6_ACTIVATING_STAGED_DATA` and during rollback recovery itself; verify idempotent recovery restores previous workspace 100% intact. [NOT IMPLEMENTED]
-9. **Repeated Crash Loop Recovery Test**: Simulate repeated crashes during startup recovery execution; verify idempotent handler cleanly completes rollback without cascading data corruption. [NOT IMPLEMENTED]
+1. **Correct & Incorrect Passphrase Test**: Verify valid passphrase unwraps `DEK`; verify invalid passphrase triggers `GeneralSecurityException` without corrupting keys. [NOT IMPLEMENTED]
+2. **Ciphertext Confidentiality & AEAD Failure Test**: Verify bit-flip in ciphertext/AAD tag throws `AEADBadTagException` and blocks read. [NOT IMPLEMENTED]
+3. **Backup Export/Import Round-Trip Test**: Export backup, restore into clean environment, confirm byte-for-byte record and media parity. [NOT IMPLEMENTED]
+4. **Corrupt, Truncated, & Modified Backup Rejection Test**: Attempt importing tampered archive; verify clean rejection before disk unpack. [NOT IMPLEMENTED]
+5. **Clean Installation / Second Device Recovery Test**: Perform clean install on Instance B, recover using BIP39 seed alone, verify complete workspace access. [NOT IMPLEMENTED]
+6. **Restore Failure & Workspace Preservation Test**: Force crash mid-restore (`ACTIVATING_STAGED_DATA`); verify startup recovery restores pre-restore workspace 100% intact. [NOT IMPLEMENTED]
+7. **Key Rotation & Schema Migration Test**: Rotate passphrase, run schema migration script; verify data remains accessible and schema updates successfully. [NOT IMPLEMENTED]
 
 ---
 
-## 8. Unresolved Design Decisions Requiring Review [PROPOSED]
+## 9. Implementation Stages
 
-1. **Storage Component Choice**: Standard SQLite + application-level AES-256-GCM record payload encryption ($0 added dependencies, zero native binaries) vs SQLCipher for Android (full-database page encryption, ~12MB native binary footprint). [PROPOSED]
-2. **Password KDF Selection**: Standard Java 17 `PBKDF2WithHmacSHA256` ($0 native libraries) vs Argon2id (requires third-party JNI native build). [PROPOSED]
-3. **KDF Parameter Benchmarking**: Establishing benchmark thresholds (e.g. 300ms-500ms max unlock latency on target mobile hardware) to finalize PBKDF2/Argon2 iteration parameters. [PROPOSED]
-4. **Recovery Mnemonic Word Count**: 12-word BIP39 mnemonic seed (128-bit seed entropy) vs 24-word BIP39 mnemonic seed (256-bit seed entropy). [PROPOSED]
-5. **Rollback Attack Checkpoint Policy**: Using user-confirmed state timestamps on launch vs storing an out-of-band sequence log in the offline recovery kit. [PROPOSED]
+1. **Stage 1**: Resolve architectural design decisions (Storage Engine choice, KDF choice).
+2. **Stage 2**: Small, reviewable implementation increments (Increments 1 through 7).
+3. **Stage 3**: Automated CI test suite and acceptance criteria verification for each increment.
+4. **Stage 4**: Preserve existing workflows (`main.yml` and `android-smoke-test.yml`) throughout.
+
+---
+
+## 10. Unresolved Decisions [PROPOSED]
+
+1. **Database/Storage Technology Choice**: Standard SQLite + application-level AES-256-GCM payload encryption ($0 added dependencies, zero native binaries) vs SQLCipher for Android (full-database page encryption, ~12MB native binary footprint). [PROPOSED]
+2. **Key Hierarchy and Recovery Format**: Standard BIP39 derivation (`PBKDF2WithHmacSHA512`, 2048 iterations) vs custom PBKDF2/HKDF wrapping scheme. [PROPOSED]
+3. **Backup Envelope File Format**: Versioned AEAD ZIP container vs custom binary stream layout. [PROPOSED]
+4. **Test Execution Environment**: Local terminal `./gradlew test` vs GitHub Actions CI test runner configuration. [PROPOSED]
+5. **Library Maintenance & MinSdk 26 Compatibility**: Verifying Android API 26+ compatibility and maintenance status for all third-party dependencies before inclusion. [PROPOSED]
