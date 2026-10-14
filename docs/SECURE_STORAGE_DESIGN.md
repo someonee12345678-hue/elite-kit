@@ -1,11 +1,11 @@
-STATUS: PROPOSED MINIMUM ARCHITECTURE SPECIFICATION — NOT IMPLEMENTED
+STATUS: PROPOSED SECURE STORAGE SPECIFICATION — NOT IMPLEMENTED
 BASELINE: dbd4153ca39ede69890ebaf47feaab7f393c3c5a
 PR REFERENCE: Pull Request #1 (`feature/secure-storage-foundation`)
-SCOPE: Local-First Minimum Viable Safe Storage for Elite Kit (`com.elitekit.app`)
+SCOPE: Local-First Secure Storage for Elite Kit (`com.elitekit.app`)
 FINANCIAL CONSTRAINT: $0 Ongoing Cost (Zero Paid APIs, Subscriptions, or Cloud Services)
 DATA POLICY: 100% Synthetic Fictional Test Data Only
 
-# ELITE KIT — MINIMUM SAFE ARCHITECTURE & SECURE STORAGE SPECIFICATION
+# ELITE KIT — SECURE STORAGE ARCHITECTURE SPECIFICATION
 
 Document Path: `docs/SECURE_STORAGE_DESIGN.md`
 Authoritative Baseline SHA: `dbd4153ca39ede69890ebaf47feaab7f393c3c5a`
@@ -13,28 +13,9 @@ Governing Authority: `MASTER_CONTROL.md`
 
 ---
 
-## 1. FINDINGS ON CURRENT DESIGN AND DEFERRED MECHANISMS
+## 1. KEY HIERARCHY AND REPLACEMENT-DEVICE RECOVERY
 
-Following a minimum-viable-product review of the initial storage design proposals, the architecture has been streamlined to eliminate unnecessary complexity, unsupported assumptions, and maintenance overhead:
-
-### 1.1 Identified Complexities & Risks Removed
-1. **Third-Party Native DB Binaries (SQLCipher)**: Adding SQLCipher introduces ~12MB of native C/NDK JNI binaries (`libsqlcipher.so`), requiring ongoing NDK maintenance, targetSdk 35 16KB memory page alignment compliance, and third-party dependency risks.
-   *Resolution*: Deferred. Replaced with standard Android SDK SQLite (`android.database.sqlite`) paired with AES-256-GCM field/column payload encryption.
-2. **Circular Key Wrapping & Redundant Key Wraps**: Prior drafts specified multiple nested key recovery wraps inside backup headers.
-   *Resolution*: Streamlined to a clean 3-key hierarchy (`DEK`, `KEK_passphrase`, `KEK_recovery`).
-3. **Speculative Nonessential Capabilities**:
-   *Resolution*: Explicitly deferred: local AI engines, dynamic executable updates, cloud sync adapters, automated case management rules, and multi-user access controls.
-
----
-
-## 2. MINIMUM RECOMMENDED ARCHITECTURE
-
-### 2.1 Storage & Payload Encryption
-- **Structured Workspace Database**: Standard Android SDK SQLite (`android.database.sqlite`) in private storage (`context.getDatabasePath()`). Confidential legal fields (notes, text, metadata) are stored as encrypted byte arrays via Java JCE `Cipher` (`AES/GCM/NoPadding`, 256-bit `DEK`, 12-byte unique random IV per row).
-- **Imported Media & Evidence Files**: Saved in application-private storage (`context.getFilesDir() + "/evidence/"`) and encrypted using stream-level AES-256-GCM (`CipherOutputStream`).
-- **Zero Paid Dependencies**: Built 100% on standard Android AOSP APIs (`minSdk 26`, Java 17).
-
-### 2.2 Key Management System & Replacement-Phone Recovery
+### 1.1 Non-Circular Key Flow Architecture
 
 ```
 [ Primary Unlock Flow (Device A) ]
@@ -42,93 +23,126 @@ Master Passphrase ──> PBKDF2WithHmacSHA256 (salt_passphrase.bin) ──> KEK
                                                                                      ├──> unwraps ──> DEK (256-bit AES)
 Android KeyStore TEE ──────────────────────────────────────────────> KEK_keystore ──┘                │
                                                                                                      v
-                                                                                           Encrypted DB & Files
+                                                                                           SQLite DB & Files
 
 [ Replacement-Phone Recovery Chain (Device B - Zero KeyStore Reliance) ]
-24-Word BIP39 Recovery Seed ──> PBKDF2WithHmacSHA512 (salt_recovery.bin) ──> KEK_recovery ──> unwraps ──> DEK
+24-Word BIP39 Seed Material ──> PBKDF2WithHmacSHA512 (salt_recovery.bin) ──> KEK_recovery ──> unwraps ──> DEK
 ```
 
-1. **Non-Circular Key Separation**:
-   - `DEK` (Data Encryption Key): Random 256-bit AES key generated on first setup. Encrypts local database records and documents. `DEK` never changes when passphrases change.
-   - `KEK_passphrase`: Derived from user Master Passphrase via `PBKDF2WithHmacSHA256`.
-   - `KEK_keystore`: Hardware-backed KeyStore alias `"EliteKit_Keystore_KEK"` for PIN/biometric fast unlock on Device A.
-   - `KEK_recovery`: Derived from 24-word BIP39 seed via `PBKDF2WithHmacSHA512`.
-2. **Replacement-Phone Recovery**: On clean hardware (Device B), entering the 24-word seed derives `KEK_recovery`, which unwraps `wrapped_dek_recovery.bin` from the user's `.eltkbackup` archive. Device B then generates a new local KeyStore alias `KEK_keystore` and re-wraps `DEK` locally for biometric unlock on Device B.
-3. **Forgotten Credentials**: Fails closed. If both Master Passphrase and 24-word Recovery Seed are lost, stored ciphertext is mathematically unrecoverable.
-
-### 2.3 User-Controlled Backup and Crash-Safe Transactional Restore
-- **Backup Container (`.eltkbackup`)**: Single offline file containing magic header (`ELITEKIT_BKUP_V1`), uint16 format version (`0x0001`), 32-byte salt, and chunked 4KB streaming AES-256-GCM encrypted payload (Google Tink `AesGcmHkdfStreaming`).
-- **Crash-Resilient Restore Engine**:
-  1. Stream archive to `cache/restore_staging/`. Verify all chunk AEAD authentication tags before touching active data.
-  2. Confirm available storage >= 2.5x archive size (1.0x staging + 1.0x pre-restore snapshot + 0.5x buffer).
-  3. Copy active data (`files/data/`) to `files/rollback_backup/` and sync `restore_state.json` via `fsync()`.
-  4. Swap staged data into `files/data/`. If process death or crash occurs during swap, `Application.onCreate()` checks `restore_state.json` on next startup and automatically restores `files/rollback_backup/` intact.
+1. **Data Encryption Key (DEK)**: Randomly generated 256-bit AES key. Encrypts local SQLite payload columns and evidence files. `DEK` is generated once on first setup and is never altered when passphrases change.
+2. **Key-Encryption Key Passphrase (`KEK_passphrase`)**: Derived from the user's Master Passphrase via `PBKDF2WithHmacSHA256` (100,000+ iterations). Unwraps `wrapped_dek_passphrase.bin` stored in private app storage.
+3. **Android KeyStore TEE Key (`KEK_keystore`)**: Non-exportable hardware-backed key generated inside Android KeyStore TEE (`"EliteKit_Keystore_KEK"`). Unwraps `wrapped_dek_keystore.bin` for PIN/biometric fast unlock on Device A.
+4. **Recovery Key-Encryption Key (`KEK_recovery`)**: Derived from the 24-word BIP39 recovery mnemonic via `PBKDF2WithHmacSHA512`. Unwraps `wrapped_dek_recovery.bin`.
+5. **Replacement-Phone Recovery**: On clean hardware (Device B), entering the 24-word seed derives `KEK_recovery`, which unwraps `wrapped_dek_recovery.bin` from the user's `.eltkbackup` archive, recovering `DEK` directly without access to Device A's KeyStore. Device B then generates a new local KeyStore alias `KEK_keystore` and re-wraps `DEK` locally for biometric unlock on Device B.
 
 ---
 
-## 3. SMALLEST IMPLEMENTATION SEQUENCE
+## 2. BACKUP FORMAT SPECIFICATION (`.eltkbackup`)
 
 ```
-+-------------------------------------------------------------------------+
-| Increment 1: Build Harness & Test Foundations                           |
-| - Configure JUnit/Robolectric test harness in gradle scripts.           |
-+-------------------------------------------------------------------------+
-                                    │
-                                    v
-+-------------------------------------------------------------------------+
-| Increment 2: Key Management System & 24-Word Seed Recovery              |
-| - Implement PBKDF2 derivation, KeyStore wrapping, & BIP39 seed recovery.|
-+-------------------------------------------------------------------------+
-                                    │
-                                    v
-+-------------------------------------------------------------------------+
-| Increment 3: SDK SQLite AEAD Encrypted Storage Engine                   |
-| - Implement AES-256-GCM payload encryption for database & evidence files.|
-+-------------------------------------------------------------------------+
-                                    │
-                                    v
-+-------------------------------------------------------------------------+
-| Increment 4: Streaming AEAD Backup Exporter & Importer                  |
-| - Implement Tink AesGcmHkdfStreaming container exporter/importer.      |
-+-------------------------------------------------------------------------+
-                                    │
-                                    v
-+-------------------------------------------------------------------------+
-| Increment 5: Transactional Crash-Safe Restore State Machine             |
-| - Implement 7-state restore engine with auto-rollback on startup.       |
-+-------------------------------------------------------------------------+
++-----------------------------------------------------------------------+
+| Magic Header: "ELITEKIT_BKUP_V1" (16 bytes)                           |
++-----------------------------------------------------------------------+
+| Format Version: 0x0001 (uint16, 2 bytes)                              |
++-----------------------------------------------------------------------+
+| Cipher Suite ID: 0x0001 (AES-256-GCM-HKDF-4KB, uint16, 2 bytes)       |
++-----------------------------------------------------------------------+
+| KDF Salt: Random KDF Salt (32 bytes)                                  |
++-----------------------------------------------------------------------+
+| Wrapped DEK Recovery Blob: wrapped_dek_recovery.bin (80 bytes)        |
++-----------------------------------------------------------------------+
+| Payload Size: Encrypted Payload Byte Length (uint64, 8 bytes)         |
++-----------------------------------------------------------------------+
+| Streaming AEAD Payload: Chunked 4KB Ciphertext Segments + Tags         |
++-----------------------------------------------------------------------+
 ```
 
-| Increment | Scope & Files Affected | Acceptance Test | Dependency |
+- **Zero Plaintext Credentials**: Neither Master Passphrases nor 24-word BIP39 seeds are ever stored or exported in backup archives.
+- **Key Wrapping Payload**: The archive contains `wrapped_dek_recovery.bin` (AES-256-GCM encrypted `DEK` wrapped under `KEK_recovery`). Unwrapping requires inputting the 24-word seed on restore.
+
+---
+
+## 3. AUTHENTICATION AND STREAMING AEAD PROCESSING
+
+- **Streaming AEAD Container**: Uses Google Tink `AesGcmHkdfStreaming` (AES-256-GCM with HKDF key derivation and 4KB payload segment chunking) to prevent `OutOfMemoryError` on large workspaces.
+- **Nonce & IV Uniqueness**: Each 4KB payload segment receives a unique 12-byte IV derived deterministically via HKDF from segment index counters, guaranteeing zero nonce reuse across backup streams.
+- **Segment Authentication & Unauthenticated Data Isolation**: Plaintext payload is written exclusively into `cache/restore_staging/`. Staged files are **NEVER** exposed to active application storage or parsed by database engines until all segment GCM authentication tags pass validation at EOF. If any segment fails tag authentication, staging is aborted and purged instantly.
+
+---
+
+## 4. CRASH-SAFE TRANSACTIONAL RESTORE ENGINE
+
+```
+ [ STATE_IDLE ] ──(Select Backup)──> [ STATE_VERIFYING ]
+                                            │
+                                            v (AEAD Tag & Manifest OK)
+                                     [ STATE_PROPOSING ]
+                                            │
+                                            v (User Explicitly Approves)
+                                     [ STATE_SNAPSHOT ] ──> Copy files/data/ to files/rollback_backup/
+                                            │
+                                            v
+                                     [ STATE_ACTIVATING ] ──> Swap staging -> files/data/
+                                            │
+                                  +---------+---------+
+                                  |                   |
+                            (Success)             (Failure / Process Death)
+                                  v                   v
+                         [ STATE_COMPLETE ]   [ STATE_ROLLBACK ] ──> Restore files/rollback_backup/
+                                  │                   │
+                                  +---------+---------+
+                                            │
+                                            v
+                                   [ STATE_CLEANUP ] ──> Delete staging & snapshot dirs
+```
+
+1. **Storage Pre-Check**: Before restore begins, available disk space must be at least **2.5x** archive size (1.0x staging + 1.0x pre-restore snapshot + 0.5x safety buffer). If storage is insufficient, restore halts in `STATE_VERIFYING` with zero state changes.
+2. **Pre-Restore Snapshot**: Active database and evidence files (`files/data/`) are copied to `files/rollback_backup/`. State `STATE_SNAPSHOT` is written to `restore_state.json` and flushed via `FileOutputStream.getFD().sync()`.
+3. **Startup Auto-Rollback**: Staged data replaces active data (`files/data/`). If process death or power loss occurs during `STATE_ACTIVATING`, `Application.onCreate()` checks `restore_state.json` upon next restart, detects incomplete activation, and automatically restores `files/rollback_backup/` pre-restore snapshot intact. Damaged archives or interrupted restores never result in data loss or a wiped workspace.
+
+---
+
+## 5. ROLLBACK AND INTEGRITY LIMITATIONS
+
+- **Tamper & Corruption Detection**: AEAD authentication tags (`AES-256-GCM`) guarantee bit-for-bit integrity and authenticity of ciphertext. Any bit-flip or payload alteration throws `AEADBadTagException` and halts processing instantly.
+- **Valid Older Backup Replay Limitation**: Cryptographic hash chains and AEAD tags verify archive integrity but **cannot** prevent an attacker with physical storage access from restoring a valid, untampered older backup export (replay attack).
+- **Mitigation & Detection**: Local launch sequence counters stored in KeyStore preferences and Workspace Timeline Audit Journals record restore events, alerting the user upon startup if an older timeline sequence is detected.
+
+---
+
+## 6. RECOVERY AND FAILURE MATRIX
+
+| Scenario | System Impact | Mitigation / Recovery Procedure | Result |
 | :--- | :--- | :--- | :--- |
-| **Inc 1** | Build harness (`build.gradle.kts`, `app/build.gradle.kts`) | `./gradlew test` passes smoke test on clean workspace. | Baseline SHA |
-| **Inc 2** | KMS (`app/.../crypto/KeyManager.java`, `Bip39Util.java`) | Valid passphrase/seed unwraps DEK; invalid credential fails gracefully. | Inc 1 |
-| **Inc 3** | DB Engine (`app/.../storage/EncryptedDatabase.java`) | Payload ciphertext stored on disk; bit-flip throws `AEADBadTagException`. | Inc 2 |
-| **Inc 4** | Backup (`app/.../backup/BackupEngine.java`) | Backup export & import round trip produces identical record hashes. | Inc 3 |
-| **Inc 5** | Restore (`app/.../backup/RestoreStateMachine.java`) | SIGKILL mid-restore auto-recovers `files/rollback_backup/` snapshot on restart. | Inc 4 |
+| **Lost Master Passphrase** | Cannot derive `KEK_passphrase`. | Enter 24-word BIP39 seed to derive `KEK_recovery` and unwrap `DEK`. Set new Master Passphrase. | Workspace Recovered |
+| **Replacement Phone (Clean OS)** | KeyStore `KEK_keystore` unavailable. | Enter 24-word BIP39 seed to derive `KEK_recovery` and unwrap `DEK`. Generate new local KeyStore key. | Workspace Recovered |
+| **Lost BOTH Passphrase & Seed** | `DEK` unwrap impossible. | None. Cryptographically fails closed (no backdoor). | Data Unrecoverable |
+| **Corrupted Backup Archive** | AEAD tag verification fails in staging. | Restore halts in `STATE_VERIFYING`. Staging directory purged; active database untouched. | Active Data Preserved |
+| **Interrupted Restore / Crash** | Process killed in `STATE_ACTIVATING`. | `Application.onCreate()` detects `STATE_ACTIVATING` on startup; restores `files/rollback_backup/`. | Active Data Preserved |
+| **Insufficient Storage** | Disk full during staging or snapshot. | Pre-check detects storage < 2.5x archive size; restore aborts in `STATE_VERIFYING`. | Active Data Preserved |
 
 ---
 
-## 4. MINIMUM AUTOMATED TEST MATRIX
+## 7. AUTOMATED TEST REQUIREMENTS MATRIX
 
-*(Note: All tests below are PROPOSED specifications marked **NOT RUN** at baseline SHA `dbd4153ca39ede69890ebaf47feaab7f393c3c5a`)*
+*(Note: All listed tests below are PROPOSED specifications marked **NOT RUN** at baseline SHA `dbd4153ca39ede69890ebaf47feaab7f393c3c5a`)*
 
-| Test ID | Scope | Verification Execution Command | Minimum Acceptance Criteria | Status |
+| Test ID | Test Case Scope | Verification Execution Command | Minimum Acceptance Criteria | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **T1** | Unit (CI) | `./gradlew test --tests "*KeyManagerTest.testPassphrase*"` | Correct passphrase unwraps DEK; wrong passphrase fails gracefully. | **NOT RUN** |
-| **T2** | Unit (CI) | `./gradlew test --tests "*StorageTest.testCiphertext*"` | Stored payload on disk contains zero plaintext substrings; tamper bit-flip fails tag check. | **NOT RUN** |
-| **T3** | Unit (CI) | `./gradlew test --tests "*BackupTest.testRoundTrip*"` | Exported `.eltkbackup` restored to fresh DB produces identical record hashes. | **NOT RUN** |
-| **T4** | Instrumentation | `./gradlew connectedAndroidTest --tests "*RecoveryTest*"` | Fresh instance with empty KeyStore recovers workspace using 24-word seed. | **NOT RUN** |
-| **T5** | Unit (CI) | `./gradlew test --tests "*BackupTest.testCorrupt*"` | Malformed archive rejected in staging; existing database 100% untouched. | **NOT RUN** |
-| **T6** | Instrumentation | `./gradlew connectedAndroidTest --tests "*RestoreCrashTest*"` | Simulated SIGKILL mid-restore auto-recovers pre-restore snapshot on application restart. | **NOT RUN** |
+| **T1** | **Passphrase Authentication** | `./gradlew test --tests "*KeyManagerTest.testPassphrase*"` | Correct passphrase unwraps DEK; wrong passphrase fails gracefully. | **NOT RUN** |
+| **T2** | **Ciphertext Confidentiality** | `./gradlew test --tests "*StorageTest.testCiphertext*"` | Stored payload contains zero plaintext; bit-flip throws `AEADBadTagException`. | **NOT RUN** |
+| **T3** | **Backup Round Trip** | `./gradlew test --tests "*BackupTest.testRoundTrip*"` | Exported `.eltkbackup` restored to fresh DB produces identical record hashes. | **NOT RUN** |
+| **T4** | **Corrupted Backup Rejection** | `./gradlew test --tests "*BackupTest.testCorrupt*"` | Malformed archive rejected in staging; existing database 100% untouched. | **NOT RUN** |
+| **T5** | **Interrupted Restore Crash Recovery** | `./gradlew connectedAndroidTest --tests "*RestoreCrashTest*"` | Simulated SIGKILL mid-restore auto-recovers pre-restore snapshot on restart. | **NOT RUN** |
+| **T6** | **Replacement Phone Recovery** | `./gradlew connectedAndroidTest --tests "*RecoveryTest*"` | Fresh instance with empty KeyStore recovers workspace using 24-word seed. | **NOT RUN** |
+| **T7** | **Preservation After Failure** | `./gradlew test --tests "*PreservationTest*"` | Disk-full or invalid header during restore leaves active dataset 100% unmodified. | **NOT RUN** |
+| **T8** | **Rollback Sequence Detection** | `./gradlew test --tests "*RollbackDetectionTest*"` | Restoring an older valid backup increments timeline journal and alerts user. | **NOT RUN** |
 
 ---
 
-## 5. REAL-RECORD RELEASE GATE & GENUINE BLOCKERS
+## 8. SCOPE CONTROL AND CONSTRAINTS
 
-### 5.1 Real-Record Gate
-No real legal records may be entered or processed in Elite Kit until **100%** of Increments 1–5 are implemented and all tests T1–T6 pass automated CI verification.
-
-### 5.2 Genuine Blockers Requiring Human Authorization
-1. **Storage Engine Approval**: Confirm approval of standard SDK SQLite payload-level encryption (recommended baseline, 0MB overhead) vs. full-page SQLCipher (~12MB native binary footprint).
-2. **Implementation Gate Authorization**: Explicit human authorization required to advance from Phase 2 (Documentation Specification) to Phase 3 (Minimum Code Implementation).
+- **Language & Runtime**: Native Java 17, Android minSdk 26+, targetSdk 35, AGP 8.7.3.
+- **Financial Limit**: $0 ongoing development cost. Zero third-party cloud APIs, subscriptions, or paid services.
+- **Fictional Test Data Policy**: 100% synthetic fictional test data only. Real legal records remain strictly prohibited until Increments 1–5 are implemented and all tests T1–T8 pass CI verification.
+- **Deferred Nonessentials**: Defer AI integration, dynamic executable plugin loaders, cloud synchronization, and complex case management features. Focus exclusively on the minimum secure storage foundation.
